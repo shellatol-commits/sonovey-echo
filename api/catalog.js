@@ -1,60 +1,84 @@
-// Sonovey Echo public read-only catalog endpoint for Vercel.
-// Airtable credentials are server-side environment variables only.
-module.exports = async function handler(req, res) {
-  res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=120");
-  res.setHeader("Access-Control-Allow-Origin", "*");
+const BASE_ID = "appbrRoPiqiN2GUva";
+const TABLE_ID = "tblQO2Ee70tX0izBw";
 
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+export default {
+  async fetch(request, env) {
+    const origin = request.headers.get("Origin") || "*";
+    const headers = {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Vary": "Origin",
+      "Content-Type": "application/json; charset=utf-8"
+    };
 
-  const token = process.env.AIRTABLE_TOKEN;
-  const baseId = process.env.AIRTABLE_BASE_ID || "appbrRoPiqiN2GUva";
-  // Airtable accepts a table ID or table name. Table ID avoids rename issues.
-  const table = process.env.AIRTABLE_MEDIA_TABLE || "tblQO2Ee70tX0izBw";
+    const url = new URL(request.url);
 
-  if (!token) {
-    return res.status(200).json({
-      configured: false,
-      records: [],
-      message: "Set AIRTABLE_TOKEN in Vercel Environment Variables."
-    });
-  }
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers });
+    }
 
-  try {
-    const url = new URL(
-      `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(table)}`
+    if (url.pathname !== "/catalog") {
+      return Response.json({ error: "Not found" }, { status: 404, headers });
+    }
+
+    if (request.method !== "GET") {
+      return Response.json(
+        { error: "Method not allowed" },
+        { status: 405, headers }
+      );
+    }
+
+    if (!env.AIRTABLE_TOKEN) {
+      return Response.json(
+        { error: "Cloudflare Worker secret AIRTABLE_TOKEN is missing" },
+        { status: 503, headers }
+      );
+    }
+
+    const airtableUrl = new URL(
+      `https://api.airtable.com/v0/${BASE_ID}/${TABLE_ID}`
     );
-    url.searchParams.set("pageSize", "100");
-    url.searchParams.set("sort[0][field]", process.env.AIRTABLE_SORT_FIELD || "Title");
-    url.searchParams.set("sort[0][direction]", "asc");
-    // Only show records whose Published checkbox is checked.
-    url.searchParams.set("filterByFormula", "{Published}=1");
 
-    const records = [];
-    let offset;
-    do {
-      if (offset) url.searchParams.set("offset", offset);
-      const response = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const body = await response.json();
+    airtableUrl.searchParams.set("pageSize", "100");
+    airtableUrl.searchParams.set("sort[0][field]", "Title");
+    airtableUrl.searchParams.set("sort[0][direction]", "asc");
+    airtableUrl.searchParams.set("filterByFormula", "{Published}=1");
 
-      if (!response.ok) {
-        console.error("Airtable catalog request failed:", response.status, body?.error?.type || "");
-        return res.status(502).json({
-          error: "Airtable request failed. Check the token permissions, base ID, table ID, and field names."
+    try {
+      const records = [];
+      let offset;
+
+      do {
+        if (offset) airtableUrl.searchParams.set("offset", offset);
+
+        const response = await fetch(airtableUrl, {
+          headers: {
+            Authorization: `Bearer ${env.AIRTABLE_TOKEN}`
+          }
         });
-      }
 
-      records.push(...(body.records || []));
-      offset = body.offset;
-    } while (offset && records.length < 500);
+        const data = await response.json();
 
-    return res.status(200).json({ configured: true, records });
-  } catch (error) {
-    console.error("Sonovey Echo catalog error:", error);
-    return res.status(500).json({ error: "Unable to load catalog." });
+        if (!response.ok) {
+          console.error("Airtable error:", response.status);
+          return Response.json(
+            { error: "Airtable request failed. Check token permissions and field names." },
+            { status: 502, headers }
+          );
+        }
+
+        records.push(...(data.records || []));
+        offset = data.offset;
+      } while (offset && records.length < 500);
+
+      return Response.json({ records }, { headers });
+    } catch (error) {
+      console.error("Catalog request failed:", error);
+      return Response.json(
+        { error: "Unable to load catalog" },
+        { status: 500, headers }
+      );
+    }
   }
 };
